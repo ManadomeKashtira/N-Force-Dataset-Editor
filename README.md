@@ -1,13 +1,13 @@
 <h2>N-Force Dataset Editor</h2>
-N-Force is A Dataset Editor build manipulating Dataset and Simple Image Viewer
-Most Use is for tagging dataset for AI or llm
+<br>N-Force is A Dataset Editor build manipulating Dataset and Simple Image Viewer</br>
+</br>Most Use is for tagging dataset for AI or llm</br>
 Feature:
-        Common IMG Feature :zoom, pan, fit to screen, color picker, IMg Converter, IMG Resizer
-        Text Transform (sort A-Z, title case, remove duplicates, strip spaces)
-        AI Feature :Featuring Online dataset Tagging,AI Upscale
-        Clean Up Feature :Clean Up Tags, Clean Up IMG
-        Metadata Feature :Simple Metadata Viewer
-        Offline tagging Feature :Custom Tags, Auto Complete Text function/ Unfinish
+<br>        Common IMG Feature :zoom, pan, fit to screen, color picker, IMg Converter, IMG Resizer</br>
+<br>        Text Transform (sort A-Z, title case, remove duplicates)</br>
+<br>        AI Feature :Featuring Online dataset Tagging,AI Upscale</br>
+<br>        Clean Up Feature :Clean Up Tags, Clean Up IMG</br>
+<br>        Metadata Feature :Simple Metadata Viewer</br>
+<br>        Offline tagging Feature :Custom Tags, Auto Complete Text function/ Unfinish</br>
 
 
  -- Build using python

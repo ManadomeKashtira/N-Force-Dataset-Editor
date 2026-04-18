@@ -1,0 +1,11 @@
+PyQt6
+Pillow
+httpx
+gradio_client
+onnxruntime-gpu
+numpy
+huggingface-hub
+google-generativeai
+torch
+safetensors
+spandrel

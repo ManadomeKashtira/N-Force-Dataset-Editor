@@ -392,6 +392,7 @@ class DatasetEditor(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("N-Force Dataset Editor")
+        self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "Icon", "Main.ico")))
         self.resize(1650, 950)
         self.current_directory = ""
         self.model = DatasetModel()
@@ -417,7 +418,8 @@ class DatasetEditor(QMainWindow):
         toolbar = QToolBar(); self.addToolBar(toolbar)
         toolbar.addAction(QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon), "Open", self, triggered=self.open_folder))
         toolbar.addSeparator()
-        self.grid_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView), "Grid", self, checkable=True)
+        self.grid_action = QAction("Grid", self, checkable=True)
+        self.grid_action.setIcon(QIcon(os.path.join(os.path.dirname(__file__), "Icon", "Grid.ico")))
         self.grid_action.triggered.connect(self.toggle_grid_view)
         toolbar.addAction(self.grid_action)
         self.grid_size_slider = QSlider(Qt.Orientation.Horizontal); self.grid_size_slider.setRange(100, 600); self.grid_size_slider.setValue(250); self.grid_size_slider.setFixedWidth(80)
@@ -430,12 +432,16 @@ class DatasetEditor(QMainWindow):
         toolbar.addAction(QAction("Rename", self, triggered=self.rename_all_images))
         toolbar.addAction(QAction("Tags Current IMG", self, triggered=self.tag_current_image))
         toolbar.addSeparator()
-        toolbar.addAction(QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon), "Del Item", self, triggered=self.delete_current_item))
+        del_act = QAction("Del Item", self)
+        del_act.setIcon(QIcon(os.path.join(os.path.dirname(__file__), "Icon", "Delete IMG.ico")))
+        del_act.triggered.connect(self.delete_current_item)
+        toolbar.addAction(del_act)
         toolbar.addSeparator()
         self.gpu_btn = QPushButton("CPU Mode")
+        self.gpu_btn.setIcon(QIcon(os.path.join(os.path.dirname(__file__), "Icon", "CPU.ico")))
         self.gpu_btn.setObjectName("GPU_BTN")
         self.gpu_btn.setCheckable(True)
-        self.gpu_btn.setFixedWidth(100)
+        self.gpu_btn.setFixedWidth(120)
         self.gpu_btn.clicked.connect(self.toggle_gpu)
         toolbar.addWidget(self.gpu_btn)
 
@@ -475,7 +481,7 @@ class DatasetEditor(QMainWindow):
 
         # ─── Top 10 Tags Panel ───
         top10_header = QHBoxLayout()
-        top10_label = QLabel("<b>Top 10 Tags</b>")
+        top10_label = QLabel("<b>🏋️Top 10 Tags</b>")
         top10_label.setStyleSheet("color: #0cc;")
         self.clear_filter_btn = QPushButton("✕ Clear")
         self.clear_filter_btn.setFixedHeight(22)
@@ -642,7 +648,12 @@ class DatasetEditor(QMainWindow):
         self.main_splitter.addWidget(list_container); self.main_splitter.addWidget(editor_container); self.main_splitter.addWidget(self.right_panel)
         self.main_splitter.setStretchFactor(0, 1); self.main_splitter.setStretchFactor(1, 4)
         main_layout.addWidget(self.main_splitter)
-        self.setStatusBar(QStatusBar())
+        status_bar = QStatusBar()
+        self.setStatusBar(status_bar)
+        
+        self.footer_label = QLabel("Made by Kashtira_Fenrir 2026 ")
+        self.footer_label.setStyleSheet("color: #888; font-size: 11px; margin-right: 15px; font-weight: bold;")
+        status_bar.addPermanentWidget(self.footer_label)
 
     def apply_styles(self):
         self.setStyleSheet("""
@@ -710,7 +721,7 @@ class DatasetEditor(QMainWindow):
 
         # ─── Populate All Tags Flow ───
         self.all_tags_flow.clear_widgets()
-        if len(self.model.all_items) > 150:
+        if len(self.model.all_items) > 200:
             self.all_tags_count_label.setText("(Disabled)")
             disabled_lbl = QLabel("You have To many images and tags to display")
             disabled_lbl.setStyleSheet("color: #888; font-style: italic; padding: 10px;")
@@ -841,7 +852,7 @@ class DatasetEditor(QMainWindow):
                 self.refresh_stats()
 
     def bulk_prefix(self):
-        p, ok = QInputDialog.getText(self, "Prefix", "Add to all:")
+        p, ok = QInputDialog.getText(self, "@Prefix", "Add to all:")
         if ok and p:
             for item in self.model.all_items: item.save_caption(p + item.load_caption())
             self.refresh_stats()
@@ -860,6 +871,8 @@ class DatasetEditor(QMainWindow):
     def toggle_gpu(self, checked):
         self.use_gpu = checked
         self.gpu_btn.setText("GPU Mode" if checked else "CPU Mode")
+        icon_name = "Gpu.ico" if checked else "CPU.ico"
+        self.gpu_btn.setIcon(QIcon(os.path.join(os.path.dirname(__file__), "Icon", icon_name)))
         self.statusBar().showMessage(f"AI Provider switched to {'GPU' if checked else 'CPU'}", 2000)
 
     def delete_current_item(self):

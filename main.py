@@ -13,12 +13,14 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QAbstractListModel, QModelIndex, QSize, pyqtSignal, QThread, QTimer, QRegularExpression, QStringListModel, QRect, QPoint, QPointF
 from PyQt6.QtGui import QPixmap, QIcon, QAction, QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QTextCursor, QBrush, QImage, QPainter
-from offline_tagger import OfflineTaggerDialog
-from image_upscaler import UpscaleDialog
-from online_services import OnlineWorker
-from clean_up import CleanUpDialog
-from image_converter import ConvertDialog, ResizeDialog, MetadataDialog
+from Toolkit.offline_tagger import OfflineTaggerDialog
+from Toolkit.image_upscaler import UpscaleDialog
+from Toolkit.online_services import OnlineWorker
+from Toolkit.clean_up import CleanUpDialog
+from Toolkit.image_converter import ConvertDialog, ResizeDialog, MetadataDialog
 import json
+import numpy as np
+from PIL import Image
 
 
 class FlowLayout(QLayout):
@@ -330,6 +332,166 @@ class DatasetItem:
                 f.write(text)
         except Exception: pass
 
+class StatsWorker(QThread):
+    finished = pyqtSignal(list, list)
+    def __init__(self, items):
+        super().__init__()
+        self.items = items
+    def run(self):
+        from collections import Counter
+        all_tags = []
+        for item in self.items:
+            c = item.caption if item._loaded_caption else ""
+            if not item._loaded_caption and os.path.exists(item.text_path):
+                try:
+                    with open(item.text_path, 'r', encoding='utf-8') as f:
+                        c = f.read()
+                except Exception: pass
+            tags = [t.strip().lower() for t in c.split(",") if t.strip()]
+            all_tags.extend(tags)
+        all_counts = Counter(all_tags).most_common()
+        top10 = all_counts[:10]
+        self.finished.emit(top10, all_counts)
+
+class DuplicateFinderWorker(QThread):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(list)
+    def __init__(self, items):
+        super().__init__()
+        self.items = items
+        self._is_cancelled = False
+    def dhash(self, image_path, hash_size=8):
+        try:
+            image = Image.open(image_path).convert('L').resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
+            pixels = np.array(image)
+            diff = pixels[:, 1:] > pixels[:, :-1]
+            return sum([2 ** i for (i, v) in enumerate(diff.flatten()) if v])
+        except: return -1
+    def run(self):
+        hashes = {}
+        duplicates = []
+        total = len(self.items)
+        for i, item in enumerate(self.items):
+            if self._is_cancelled: break
+            h = self.dhash(item.image_path)
+            if h != -1:
+                if h in hashes:
+                    duplicates.append((item, hashes[h]))
+                else: hashes[h] = item
+            self.progress.emit(int((i + 1) / total * 100))
+        self.finished.emit(duplicates)
+
+class DuplicateFinderDialog(QDialog):
+    def __init__(self, parent, items):
+        super().__init__(parent)
+        self.items = items
+        self.duplicates = []
+        self.init_ui()
+    def init_ui(self):
+        self.setWindowTitle("Find Duplicates")
+        self.setFixedWidth(500)
+        self.setStyleSheet("QDialog { background-color: #1e1e1e; color: #d4d4d4; } QLabel { color: #cccccc; } QPushButton { background-color: #333; color: #ccc; padding: 6px; border: 1px solid #444; } QPushButton:hover { background-color: #444; }")
+        layout = QVBoxLayout(self)
+        self.info_label = QLabel(f"Scan {len(self.items)} images for exact or near duplicates?")
+        layout.addWidget(self.info_label)
+        self.start_btn = QPushButton("Start Scan")
+        self.start_btn.clicked.connect(self.start_scan)
+        layout.addWidget(self.start_btn)
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+        self.results_list = QListView()
+        self.results_model = QStringListModel()
+        self.results_list.setModel(self.results_model)
+        layout.addWidget(self.results_list)
+        self.delete_btn = QPushButton("Delete Selected Duplicates")
+        self.delete_btn.clicked.connect(self.delete_selected)
+        self.delete_btn.setEnabled(False)
+        layout.addWidget(self.delete_btn)
+    def start_scan(self):
+        self.start_btn.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+        self.worker = DuplicateFinderWorker(self.items)
+        self.worker.progress.connect(self.progress.setValue)
+        self.worker.finished.connect(self.on_finished)
+        self.worker.start()
+    def on_finished(self, duplicates):
+        self.duplicates = duplicates
+        self.progress.setVisible(False)
+        self.start_btn.setEnabled(True)
+        if not duplicates:
+            self.info_label.setText("No duplicates found.")
+            return
+        self.info_label.setText(f"Found {len(duplicates)} duplicate(s).")
+        list_data = [f"{dup.filename} (Duplicate of {orig.filename})" for dup, orig in duplicates]
+        self.results_model.setStringList(list_data)
+        self.results_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.results_list.selectAll()
+        self.delete_btn.setEnabled(True)
+    def delete_selected(self):
+        indexes = self.results_list.selectedIndexes()
+        if not indexes: return
+        if QMessageBox.question(self, 'Delete', f"Delete {len(indexes)} duplicate images?") == QMessageBox.StandardButton.Yes:
+            for idx in sorted(indexes, key=lambda i: i.row(), reverse=True):
+                row = idx.row()
+                dup_item = self.duplicates[row][0]
+                try:
+                    os.remove(dup_item.image_path)
+                    os.remove(dup_item.text_path)
+                    self.parent().model.remove_item(dup_item)
+                except: pass
+            self.parent().update_nav_slider()
+            self.parent().refresh_stats()
+            self.accept()
+
+class TagAliasDialog(QDialog):
+    def __init__(self, parent, items):
+        super().__init__(parent)
+        self.items = items
+        self.init_ui()
+    def init_ui(self):
+        self.setWindowTitle("Tag Aliasing / Merging")
+        self.setFixedWidth(400)
+        self.setStyleSheet("QDialog { background-color: #1e1e1e; color: #d4d4d4; } QLabel { color: #cccccc; } QLineEdit { background: #252526; color: #ccc; border: 1px solid #444; padding: 6px; } QPushButton { background-color: #333; color: #ccc; padding: 6px; border: 1px solid #444; } QPushButton:hover { background-color: #444; }")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Merge multiple tags into a single target tag."))
+        layout.addWidget(QLabel("Tags to merge (comma separated):"))
+        self.source_edit = QLineEdit()
+        self.source_edit.setPlaceholderText("e.g. 1girl, girl, woman")
+        layout.addWidget(self.source_edit)
+        layout.addWidget(QLabel("Target Tag:"))
+        self.target_edit = QLineEdit()
+        self.target_edit.setPlaceholderText("e.g. 1girl")
+        layout.addWidget(self.target_edit)
+        self.btn_apply = QPushButton("Apply to All Images")
+        self.btn_apply.clicked.connect(self.apply_aliases)
+        layout.addWidget(self.btn_apply)
+    def apply_aliases(self):
+        sources = [t.strip() for t in self.source_edit.text().split(',') if t.strip()]
+        target = self.target_edit.text().strip()
+        if not sources or not target:
+            QMessageBox.warning(self, "Error", "Please provide both source and target tags.")
+            return
+        count = 0
+        for item in self.items:
+            content = item.load_caption()
+            tags = [t.strip() for t in content.split(',') if t.strip()]
+            modified = False
+            new_tags = []
+            for tag in tags:
+                if tag in sources:
+                    if target not in new_tags: new_tags.append(target)
+                    modified = True
+                else:
+                    new_tags.append(tag)
+            if modified:
+                item.save_caption(", ".join(new_tags))
+                count += 1
+        self.parent().statusBar().showMessage(f"Aliased tags in {count} images.", 3000)
+        self.parent().refresh_stats()
+        self.accept()
+
 class LoaderThread(QThread):
     finished = pyqtSignal(list)
     def __init__(self, directory):
@@ -411,6 +573,15 @@ class DatasetEditor(QMainWindow):
         self.load_online_config()
         self.init_ui()
         self.apply_styles()
+        self.load_last_directory()
+
+    def load_last_directory(self):
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("N-Force", "DatasetEditor")
+        last_dir = settings.value("last_directory", "")
+        if last_dir and os.path.exists(last_dir):
+            self.current_directory = last_dir
+            self.loader = LoaderThread(last_dir); self.loader.finished.connect(self.on_load_finished); self.loader.start()
 
     def init_ui(self):
         central_widget = QWidget(); self.setCentralWidget(central_widget)
@@ -428,6 +599,7 @@ class DatasetEditor(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(QAction("Prefix", self, triggered=self.bulk_prefix))
         toolbar.addAction(QAction("Replace", self, triggered=self.bulk_replace_dialog))
+        toolbar.addAction(QAction("Tag Aliasing", self, triggered=self.show_tag_alias_dialog))
         toolbar.addAction(QAction("Delete Tag (Global)", self, triggered=self.delete_tag_global))
         toolbar.addAction(QAction("Rename", self, triggered=self.rename_all_images))
         toolbar.addAction(QAction("Tags Current IMG", self, triggered=self.tag_current_image))
@@ -564,6 +736,7 @@ class DatasetEditor(QMainWindow):
         self.btn_img_metadata = QPushButton("IMG Metadata")
         self.btn_upscale_ai = QPushButton("Upscale AI")
         self.btn_clean_up = QPushButton("Clean Up")
+        self.btn_find_duplicates = QPushButton("Find Duplicates")
 
         row1.addWidget(self.btn_batch_tags)
         row1.addWidget(self.btn_convert_img)
@@ -571,10 +744,13 @@ class DatasetEditor(QMainWindow):
         row2.addWidget(self.btn_img_metadata)
         row3.addWidget(self.btn_upscale_ai)
         row3.addWidget(self.btn_clean_up)
+        row4 = QHBoxLayout(); row4.setSpacing(4)
+        row4.addWidget(self.btn_find_duplicates)
         
         batch_v_layout.addLayout(row1)
         batch_v_layout.addLayout(row2)
         batch_v_layout.addLayout(row3)
+        batch_v_layout.addLayout(row4)
         
         right_layout.addWidget(self.batch_container)
 
@@ -584,6 +760,7 @@ class DatasetEditor(QMainWindow):
         self.btn_img_metadata.clicked.connect(self.show_metadata_dialog)
         self.btn_upscale_ai.clicked.connect(self.show_upscale_dialog)
         self.btn_clean_up.clicked.connect(self.show_cleanup_dialog)
+        self.btn_find_duplicates.clicked.connect(self.show_duplicate_finder)
 
         # Online Mode Section
         right_layout.addSpacing(20)
@@ -626,17 +803,17 @@ class DatasetEditor(QMainWindow):
         service_grid.addWidget(self.btn_joy_caption)
         right_layout.addLayout(service_grid)
 
-        # Connect Online Buttons
+# Connect Online Buttons
         self.btn_gemini_tags.clicked.connect(lambda: self.run_online_service("gemini_tags"))
         self.btn_gemini_caption.clicked.connect(lambda: self.run_online_service("gemini_caption"))
         self.btn_wd_tagger.clicked.connect(lambda: self.run_online_service("wd_tagger"))
         self.btn_joy_tag.clicked.connect(lambda: self.run_online_service("joy_tag"))
         self.btn_joy_caption.clicked.connect(lambda: self.run_online_service("joy_caption"))
 
-        # Progress / Log Area
+# Progress / Log Area
         right_layout.addStretch()
         self.online_log = QLabel("Ready")
-        self.online_log.setStyleSheet("font-size: 10px; color: #888;")
+        self.online_log.setStyleSheet("font-size: 20px; color: #f24d18;")
         self.online_progress = QProgressBar()
         self.online_progress.setFixedHeight(8)
         self.online_progress.setStyleSheet("QProgressBar { background: #111; border: none; border-radius: 4px; } QProgressBar::chunk { background: #007acc; }")
@@ -651,8 +828,8 @@ class DatasetEditor(QMainWindow):
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
         
-        self.footer_label = QLabel("Made by Kashtira_Fenrir 2026 ")
-        self.footer_label.setStyleSheet("color: #888; font-size: 11px; margin-right: 15px; font-weight: bold;")
+        self.footer_label = QLabel("Made by Kashtira_Fenrir @2026 ")
+        self.footer_label.setStyleSheet("color: #C24145; font-size: 11px; margin-right: 15px; font-weight: bold;")
         status_bar.addPermanentWidget(self.footer_label)
 
     def apply_styles(self):
@@ -699,14 +876,11 @@ class DatasetEditor(QMainWindow):
 
     def refresh_stats(self):
         if not self.model.all_items: return
-        all_tags = []
-        for item in self.model.all_items:
-            tags = [t.strip().lower() for t in item.load_caption().split(",") if t.strip()]
-            all_tags.extend(tags)
-        all_counts = Counter(all_tags).most_common()
-        top10 = all_counts[:10]
+        self.stats_worker = StatsWorker(self.model.all_items.copy())
+        self.stats_worker.finished.connect(self.update_stats_ui)
+        self.stats_worker.start()
 
-        # ─── Populate Top 10 Flow ───
+    def update_stats_ui(self, top10, all_counts):
         self.top10_flow.clear_widgets()
         for tag, count in top10:
             btn = QPushButton(f"{tag} ({count})")
@@ -719,25 +893,30 @@ class DatasetEditor(QMainWindow):
             btn.clicked.connect(lambda checked, t=tag: self.filter_by_tag(t))
             self.top10_flow.addWidget(btn)
 
-        # ─── Populate All Tags Flow ───
         self.all_tags_flow.clear_widgets()
-        if len(self.model.all_items) > 200:
-            self.all_tags_count_label.setText("(Disabled)")
-            disabled_lbl = QLabel("You have To many images and tags to display")
-            disabled_lbl.setStyleSheet("color: #888; font-style: italic; padding: 10px;")
-            self.all_tags_flow.addWidget(disabled_lbl)
-        else:
-            self.all_tags_count_label.setText(f"({len(all_counts)})")
-            for tag, count in all_counts:
-                btn = QPushButton(f"{tag} ({count})")
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.setStyleSheet("""
-                    QPushButton { background: #2a2a2a; color: #aaa; border: 1px solid #444; 
-                    padding: 1px 3px; border-radius: 5px; font-size: 10px; }
-                    QPushButton:hover { background: #3a3a3a; color: #ffffff; border-color: #888; }
-                """)
-                btn.clicked.connect(lambda checked, t=tag: self.filter_by_tag(t))
-                self.all_tags_flow.addWidget(btn)
+        self.all_tags_count_label.setText(f"({len(all_counts)})")
+        
+        # Display up to 500 tags to prevent UI freeze
+        for tag, count in all_counts[:500]:
+            btn = QPushButton(f"{tag} ({count})")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton { background: #2a2a2a; color: #aaa; border: 1px solid #444; 
+                padding: 1px 3px; border-radius: 5px; font-size: 10px; }
+                QPushButton:hover { background: #3a3a3a; color: #ffffff; border-color: #888; }
+            """)
+            btn.clicked.connect(lambda checked, t=tag: self.filter_by_tag(t))
+            self.all_tags_flow.addWidget(btn)
+
+    def show_tag_alias_dialog(self):
+        if not self.model.all_items: return
+        dialog = TagAliasDialog(self, self.model.all_items)
+        dialog.exec()
+
+    def show_duplicate_finder(self):
+        if not self.model.all_items: return
+        dialog = DuplicateFinderDialog(self, self.model.all_items)
+        dialog.exec()
 
     def filter_by_tag(self, tag):
         """Filter the image list to show only images with the given tag."""
@@ -777,7 +956,9 @@ class DatasetEditor(QMainWindow):
             self.list_view.setViewMode(QListView.ViewMode.IconMode); self.list_view.setResizeMode(QListView.ResizeMode.Adjust)
             self.model.icon_mode = True; avail_width = self.list_view.width() - 30; self.grid_size_slider.setValue(avail_width // 4 - 20); self.update_grid_density(self.grid_size_slider.value())
         else:
-            self.list_view.setViewMode(QListView.ViewMode.ListMode); self.model.icon_mode = False
+            self.list_view.setViewMode(QListView.ViewMode.ListMode)
+            self.list_view.setGridSize(QSize()) # Fix large spacing by resetting grid size
+            self.model.icon_mode = False
         self.model.layoutChanged.emit()
 
     def update_grid_density(self, v):
@@ -788,6 +969,10 @@ class DatasetEditor(QMainWindow):
 
     def update_nav_slider(self):
         c = self.model.rowCount(); self.nav_slider.setRange(0, max(0, c - 1)); self.index_label.setText(f"0 / {c}")
+# Current Directory
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("N-Force", "DatasetEditor")
+        settings.setValue("last_directory", self.current_directory)
 
     def item_selected(self, index):
         if not index.isValid(): return
@@ -825,18 +1010,25 @@ class DatasetEditor(QMainWindow):
 
     def delete_tag_global(self):
         if not self.model.all_items: return
-        tag, ok = QInputDialog.getText(self, "Delete Tag (Global)", "Delete Tags From All IMGS!!:")
-        if ok and tag:
-            tag = tag.strip()
+        input_text, ok = QInputDialog.getText(self, "Delete Tag (Global)", " use comma for delete multiple tags):")
+        if ok and input_text:
+            tags_to_delete = [t.strip() for t in input_text.split(",") if t.strip()]
+            if not tags_to_delete: return
+            
             count = 0
             for item in self.model.all_items:
                 content = item.load_caption()
-                tags = [t.strip() for t in content.split(",") if t.strip()]
-                if tag in tags:
-                    tags.remove(tag)
-                    item.save_caption(", ".join(tags))
+                current_tags = [t.strip() for t in content.split(",") if t.strip()]
+                modified = False
+                for tag in tags_to_delete:
+                    if tag in current_tags:
+                        current_tags.remove(tag)
+                        modified = True
+                
+                if modified:
+                    item.save_caption(", ".join(current_tags))
                     count += 1
-            self.statusBar().showMessage(f"Removed '{tag}' from {count} images.", 3000)
+            self.statusBar().showMessage(f"Removed tags from {count} images.", 3000)
             self.model.layoutChanged.emit()
             idx = self.list_view.currentIndex()
             if idx.isValid(): self.item_selected(idx)
@@ -854,7 +1046,14 @@ class DatasetEditor(QMainWindow):
     def bulk_prefix(self):
         p, ok = QInputDialog.getText(self, "@Prefix", "Add to all:")
         if ok and p:
-            for item in self.model.all_items: item.save_caption(p + item.load_caption())
+            prefix = p.strip()
+            if not prefix.endswith(","):
+                prefix += ", "
+            else:
+                prefix += " "
+            for item in self.model.all_items: 
+                content = item.load_caption()
+                item.save_caption(prefix + content)
             self.refresh_stats()
 
     def rename_all_images(self):
@@ -979,8 +1178,6 @@ class DatasetEditor(QMainWindow):
         gemini_models = [
             "gemini-2.0-flash",
             "gemini-2.0-flash-lite",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
             "gemini-2.5-flash-preview-04-17",
             "gemini-2.5-pro-preview-03-25",
         ]
